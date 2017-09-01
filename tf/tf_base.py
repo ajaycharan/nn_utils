@@ -2,11 +2,13 @@ import tensorflow as tf
 import numpy as np
 import time
 from easydict import EasyDict as edict
-import vis_utils
-from pyhelper_fns import other_utils as ou
 from os import path as osp
 import matplotlib.pyplot as plt
 import shutil
+import functools
+
+from pyhelper_fns import vis_utils
+from pyhelper_fns import path_utils
 
 class NetBase(object):
   def __init__(self, rand_seed=3, grad_clip=None, 
@@ -22,7 +24,7 @@ class NetBase(object):
     self.rand_seed = rand_seed
     self.net_prms  = net_prms
     tf.set_random_seed(rand_seed)
-    #self._summary_writer = None
+    self._summary_writer = None
     self.grad_clip = grad_clip
     #Useful names
     self._names = {}
@@ -147,20 +149,22 @@ class NetBase(object):
 
   def merge_train_summary_ops(self):
     """Returns the list of summary ops during training """
-    general_scalar_smmry = tf.merge_all_summaries(key=self._names['summary']['general']['scalar'])
-    general_hist_smmry = tf.merge_all_summaries(key=self._names['summary']['general']['histogram'])
-    train_smmry   = tf.merge_all_summaries(key=self._names['summary']['train'])
+    general_scalar_smmry = tf.summary.merge_all(key=self._names['summary']['general']['scalar'])
+    general_hist_smmry = tf.summary.merge_all(key=self._names['summary']['general']['histogram'])
+    train_smmry   = tf.summary.merge_all(key=self._names['summary']['train'])
     if general_scalar_smmry is not None:
       self._train_summary_ops.append(general_scalar_smmry)
       self._train_scalar_summary_ops.append(general_scalar_smmry)
     self._train_summary_ops.append(general_hist_smmry)
-    self._train_summary_ops.append(train_smmry)
+    if train_smmry is not None:
+      self._train_summary_ops.append(train_smmry)
     #Scalar summary ops
-    self._train_scalar_summary_ops.append(train_smmry)
+    #self._train_scalar_summary_ops.append(train_smmry)
 
   def merge_val_summary_ops(self):
-    val_smmry = tf.merge_all_summaries(key=self._names['summary']['val'])
-    self._val_summary_ops.append(val_smmry)
+    val_smmry = tf.summary.merge_all(key=self._names['summary']['val'])
+    if val_smmry is not None:
+      self._val_summary_ops.append(val_smmry)
 
   def add_to_trainval_summary(self, ops, summary_type='scalar'):
     set_names = ['train', 'val']
@@ -171,7 +175,7 @@ class NetBase(object):
         name = '%s_%s' % (s, op.name)
         if summary_type == 'scalar':
           print (name)
-          tf.scalar_summary(name, op, collections=[self._names['summary'][s]])
+          tf.summary.scalar(name, op, collections=[self._names['summary'][s]])
         else:
           raise Exception('Only scalar summaries supported')
 
@@ -187,11 +191,12 @@ class NetBase(object):
       if sm_name is None:
         sm_name = '%s_summary' % op.name
       if summary_type == 'scalar':
-        tf.scalar_summary(op.name, op, collections=[self._names['summary']['general']['scalar']])
+        tf.summary.scalar(op.name, op, 
+              collections=[self._names['summary']['general']['scalar']])
       elif summary_type == 'histogram':
         print (op.name, op)
-        tf.histogram_summary(op.name, op,
-                             collections=[self._names['summary']['general']['histogram']])
+        tf.summary.histogram(op.name, op,
+              collections=[self._names['summary']['general']['histogram']])
       else:
         raise Exception('Only scalar summaries supported')
 
@@ -209,8 +214,8 @@ class NetBase(object):
       if var.op.name in self._added_param_smmry:
         print ('%s already added to summary' % var.op.name)
         continue
-      tf.histogram_summary(var.op.name, var,
-                           collections=[self._names['summary']['general']['histogram']])
+      tf.summary.histogram(var.op.name, var,
+        collections=[self._names['summary']['general']['histogram']])
       self._added_param_smmry.append(var.op.name)
 
   def add_grad_summaries(self, grads=None):
@@ -221,8 +226,8 @@ class NetBase(object):
         print ('%s already added to summary' % var.op.name)
         continue
       if grad is not None:
-        tf.histogram_summary(var.op.name + '/gradients', grad,
-                             collections=[self._names['summary']['general']['histogram']])
+        tf.summary.histogram(var.op.name + '/gradients', grad,
+          collections=[self._names['summary']['general']['histogram']])
         self._added_grad_smmry.append(var.op.name)
 
   def finalize(self):
@@ -235,9 +240,11 @@ class NetBase(object):
 
 class TrainManager(object):
   def __init__(self, nb, feed_dict_fn, log_freq=1000, snapshot_freq=3000,
-      log_dir='/data0/pulkitag/tf_data/logs', model_dir='/data0/pulkitag/tf_data/models',
+      log_dir='/data0/pulkitag/tf_data/logs', 
+      model_dir='/data0/pulkitag/tf_data/models',
       max_train_iter=100000, test_freq=500, 
-      feed_dict_ph=[], train_feed_dict_args=[], val_feed_dict_args=[],
+      feed_dict_ph=[],
+      train_feed_dict_args=[], val_feed_dict_args=[],
       print_freq=1, gpuFraction=0.3):
     """
       nb: NetDef
@@ -252,8 +259,8 @@ class TrainManager(object):
     self.max_train_iter = max_train_iter
     self.test_freq      = test_freq
     if model_dir is not None:
-      ou.mkdir(self.model_dir)
-      self._saver = tf.train.Saver(tf.all_variables(), 
+      path_utils.mkdir(self.model_dir)
+      self._saver = tf.train.Saver(tf.global_variables(), 
                                    max_to_keep=5,
                                    keep_checkpoint_every_n_hours=2,
                                    name='save_model')
@@ -291,13 +298,14 @@ class TrainManager(object):
     if osp.exists(self.log_dir):
       shutil.rmtree(self.log_dir)     
       shutil.rmtree(self.model_dir)
-    ou.mkdir(self.log_dir)
-    ou.mkdir(self.model_dir)
+    path_utils.mkdir(self.log_dir)
+    path_utils.mkdir(self.model_dir)
 
   def setup_summary_writer(self):
     if self.log_dir is not None: 
-      ou.mkdir(self.log_dir)
-      self.sm_writer = tf.train.SummaryWriter(self.log_dir, tf.get_default_graph())
+      path_utils.mkdir(self.log_dir)
+      self.sm_writer = tf.summary.FileWriter(self.log_dir, 
+                    tf.get_default_graph())
     else:
       self.sm_writer = None
 
@@ -312,20 +320,29 @@ class TrainManager(object):
     return isNanInf
        
   def train(self):
+    #Delete stuff from the last training run
     self.delete_old_logs_and_models()
     self.setup_summary_writer()
+    
+    #Merge train/val ops
     self.nb.merge_train_summary_ops()
     self.nb.merge_val_summary_ops()
-    init_var  = tf.initialize_all_variables()
+    
+    #Finalize the graph
+    init_var  = tf.global_variables_initializer()
     tf.Graph.finalize(tf.get_default_graph())
+    
+    #Configure GPU options
     if self.gpuFraction is None:
       self.gpuFraction = 1.0
     gpuOptions = tf.GPUOptions(per_process_gpu_memory_fraction=self.gpuFraction)
+    
     with tf.Session(config=tf.ConfigProto(gpu_options=gpuOptions)) as sess:
       sess.run(init_var)
       init_ops = self.nb.init_ops
       if len(init_ops) > 0:
         sess.run(init_ops)
+
       t1 = time.time()
       for i in range(self.max_train_iter):
         log_smmry = False
@@ -338,12 +355,16 @@ class TrainManager(object):
         nt    = len(self.nb.train_ops)
         #Loss start and stop ops
         nl_st, nl_en = nt, nt + len(self.nb.loss_ops)
-        #Acuracy start and stop ops
+        #Accuracy start and stop ops
         na_st, na_en = nl_en, nl_en + len(self.nb.acc_ops)
         ns_st        = na_en
         delta_t   = time.time() - t1
-        feed_dict = self.feed_dict_fn(self.feed_dict_ph, *self.train_feed_dict_args)
+
+        #Run the network
+        feed_dict = self.feed_dict_fn(self.feed_dict_ph,
+                             *self.train_feed_dict_args)
         res       = sess.run(all_ops, feed_dict=feed_dict)
+        
         #Check if any of the losses went to NaN/Inf
         check = [self.check_nan_inf(v) for v in res[nl_st:nl_en]] 
         assert not np.array(check).any(), 'NaNs or Infs found'
@@ -360,12 +381,14 @@ class TrainManager(object):
         #Store the model if required
         if np.mod(i, self.snapshot_freq) == 0:
           self._saver.save(sess, self.model_dir, global_step=i)
+        
         #Test the model if required
         if np.mod(i, self.test_freq) == 0:
           print ('TESTING ...')
           all_ops = self.nb.loss_ops + \
                     self.nb.acc_ops + self.nb.val_summary_ops
-          feed_dict = self.feed_dict_fn(self.feed_dict_ph, *self.val_feed_dict_args)
+          feed_dict = self.feed_dict_fn(self.feed_dict_ph, 
+                        *self.val_feed_dict_args)
           res       = sess.run(all_ops, feed_dict=feed_dict)
           nl_st, nl_en = 0, len(self.nb.loss_ops)
           na_st, na_en = nl_en, nl_en + len(self.nb.acc_ops)
@@ -500,25 +523,27 @@ def create_encoder(ims, convLayers, fcLayers,
   assert type(ims) in [list, tuple]
   conv_stack = tf.make_template("convs", convLayers.get)
   fc_stack   = tf.make_template("fcs", fcLayers.get)
-  #Convolutional processing
-  if convLayers.nb.net_prms['mean_subtract']:
-    ims = [im - 128. for im in ims]
-  if convLayers.nb.net_prms['im_nrmlz']:
-    ims = [im / 128. for im in ims]
+
+  if convLayers.nb.net_prms is not None:
+    #Convolutional processing
+    if convLayers.nb.net_prms['mean_subtract']:
+      ims = [im - 128. for im in ims]
+    if convLayers.nb.net_prms['im_nrmlz']:
+      ims = [im / 128. for im in ims]
     
   #Concatenat the images/features
   if concatMode is 'lateFusion':
     ops = [conv_stack(im) for im in ims]
-    ops = tf.concat(3, ops)
+    ops = tf.concat(ops, 3)
   elif concatMode is 'earlyFusion':
-    imStack = tf.concat(3, ims)
+    imStack = tf.concat(ims, 3)
     print ('imStack', imStack.get_shape())
     ops = conv_stack(ims)
   else:
     raise Exception('concatMode {0} is invalid'.format(concatMode))
   
   #Reshape the ops to be consistent with the fc-layers
-  op_sz = reduce(lambda x, y: int(x) * int(y), ops.get_shape()[1:])
+  op_sz = functools.reduce(lambda x, y: int(x) * int(y), ops.get_shape()[1:])
   with tf.variable_scope('layer_reshape') as scope:
     ops = tf.reshape(ops, [-1, op_sz])
   #Fully connected processing 
